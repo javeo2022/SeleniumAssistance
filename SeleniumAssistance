@@ -1,0 +1,446 @@
+Option Explicit
+Option Base 0
+Private driver As Selenium.ChromeDriver
+Private Keys As New Selenium.Keys
+Private By As New Selenium.By
+Private objFso As Object ' Scripting.FileSystemObject '--- 「Microsoft Scripting Runtime」の参照設定
+Private objDic As Object ' Scripting.Dictionary
+Private objReg As Object ' VBScript_RegExp_55.RegExp '--- 「Microsoft VBScript Regular Expressions 5.5」の参照設定
+Private objMat As Object 'MatchCollection '--- 「Microsoft VBScript Regular Expressions 5.5」の参照設定
+Private xmlhttp As Object ' MSXML2.XMLHTTP60 '--- 「Microsoft XML v6.0」の参照設定
+ 
+Private profile As String
+Private i As Long, lp As Long
+Private RemainingSec As Long
+Private Const defWaitMS As Long = 500
+Private Const LpWaitCnt As Long = 30
+Public Function SafeGet(ByVal driver As Selenium.ChromeDriver, target_url As String, Optional check_mode As Long = 0) As Boolean
+'====================================================================================================
+'Getがエラーになりがちだから慎重にGetをする
+'※リダイレクトページだと上手くいかない・・・
+'====================================================================================================
+With driver
+    On Error Resume Next
+    .Get target_url
+    If check_mode = 0 Then
+        Do
+            If .Url = target_url Then
+                .Wait 1000
+                Exit Do
+            End If
+        Loop
+    Else
+        .Wait 1000
+    End If
+    On Error GoTo 0
+End With
+End Function
+Public Function SeleniumOpen(ByRef driver As Selenium.ChromeDriver) As Boolean
+'====================================================================================================
+'普通にChromeを立ち上げて後からChromeDriverで掴みに行く
+'※添付フォルダにプロファイル情報を置く
+'====================================================================================================
+Select Case True
+    Case Len(Environ("TMP")) > 0
+        profile = Environ("TMP") & "\userdata"
+    Case Len(Environ("TEMP"))
+        profile = Environ("TEMP") & "\userdata"
+    Case Else
+        profile = ThisWorkbook.Path & "\userdata"
+End Select
+On Error Resume Next '---プロセスファイルを掴んでいる場合はスキップする
+With CreateObject("Scripting.FileSystemObject")
+    If .FolderExists(profile) = True Then '---一時プロファイル用にフォルダがあれば削除
+        .DeleteFolder profile
+    End If
+    .CreateFolder profile '---一時プロファイル用にフォルダを作る
+End With
+
+CreateObject("WScript.Shell").Run ("chrome.exe --remote-debugging-port=9222 --user-data-dir=""" & profile & "")
+On Error GoTo 0
+driver.SetCapability "debuggerAddress", "127.0.0.1:9222"
+End Function
+Public Function SeleniumClose(ByRef driver As Selenium.ChromeDriver, Optional DeleteProfile As Boolean = True) As Boolean
+'====================================================================================================
+'Chromeを落としつつ一時プロファイルフォルダを削除する
+'====================================================================================================
+On Error Resume Next
+driver.Close
+driver.Quit
+
+If DeleteProfile = True Then
+    With CreateObject("Scripting.FileSystemObject")
+        If .FolderExists(profile) = True Then
+            .DeleteFolder profile
+        End If
+    End With
+End If
+On Error GoTo 0
+Set driver = Nothing
+End Function
+Public Function ViewCheck(ByVal driver As Selenium.WebDriver, ByVal By As Selenium.By, Optional CheckMode As Long = 0, Optional ByVal Index As Long = 1, Optional TotalWaitSec As Long = 30) As Boolean
+RemainingSec = TotalWaitSec
+Do While RemainingSec > 0 '---要素が存在するかチェック
+    If driver.FindElements(By).Count >= Index Then
+        ViewCheck = ViewCheckElm(driver, driver.FindElements(By)(Index), CheckMode, RemainingSec)
+        Exit Function
+    End If
+    driver.Wait 1000
+    RemainingSec = RemainingSec - 1
+Loop
+ViewCheck = False
+End Function
+Public Function ViewCheckElm(ByVal driver As Selenium.WebDriver, element As Selenium.WebElement, Optional CheckMode As Long = 0, Optional TotalWaitSec As Long = 30) As Boolean
+'==============================
+'CheckMode
+'0:活性化しているかまで
+'1:画面上に表示されているかまで
+'2:DOMに存在しているかまで
+'==============================
+On Error GoTo ErrEnd
+RemainingSec = TotalWaitSec
+With element
+    Do While RemainingSec > 0 '---要素が存在するかチェック
+        If .IsPresent = True Then
+            Exit Do
+        Else
+            DoEvents
+            driver.Wait 1000 '---1秒待機
+        End If
+        RemainingSec = RemainingSec - 1
+    Loop
+    If .IsPresent = False Then '---ループを抜けても要素が見つからないと言うことは失敗扱い
+        ViewCheckElm = False
+        Exit Function
+    End If
+    
+    If CheckMode <= 1 Then
+        Do While RemainingSec > 0 '---要素が見えているかチェック
+            If .IsDisplayed = True Then
+                Exit Do
+            Else
+                DoEvents
+                driver.Wait 1000 '---1秒待機
+            End If
+            RemainingSec = RemainingSec - 1
+        Loop
+        If .IsDisplayed = False Then '---ループを抜けても見つからないと言うことは失敗扱い
+            ViewCheckElm = False
+            Exit Function
+        End If
+    End If
+    
+    If CheckMode <= 2 Then
+        If .IsEnabled = False Then '---活性化しているかチェック
+            ViewCheckElm = False
+            Exit Function
+        End If
+    End If
+End With
+ViewCheckElm = True
+On Error GoTo 0
+Exit Function
+ErrEnd:
+ViewCheckElm = False
+Debug.Print Err.Description
+End Function
+Public Function InputText(ByVal driver As Selenium.WebDriver, ByVal By As Selenium.By, ByVal str As String, Optional AppendMode As Boolean = False, Optional ByVal Index As Long = 1, Optional WaitMS = defWaitMS, Optional TotalWaitSec As Long = 30, Optional ClearWaitMS As Long = 500) As Boolean
+'====================================================================================================
+'InputTextElmの亜種
+'====================================================================================================
+If driver.FindElements(By).Count > 0 Then
+    InputText = InputTextElm(driver, driver.FindElements(By)(Index), str, AppendMode, WaitMS, TotalWaitSec)
+Else
+    InputText = False
+End If
+End Function
+Public Function InputTextElm(ByVal driver As Selenium.WebDriver, element As Selenium.WebElement, ByVal str As String, Optional AppendMode As Boolean = False, Optional WaitMS = defWaitMS, Optional TotalWaitSec As Long = 30, Optional ClearWaitMS As Long = 500) As Boolean
+'====================================================================================================
+'文字入力を色々考慮しながらやる
+'====================================================================================================
+On Error GoTo ErrEnd
+RemainingSec = TotalWaitSec
+With element
+    Do While RemainingSec > 0 '---要素が存在するかチェック
+        driver.Timeouts.ImplicitWait = 30
+        If .IsPresent = True Then
+            Exit Do
+        Else
+            DoEvents
+            driver.Wait 1000 '---1秒待機
+        End If
+        RemainingSec = RemainingSec - 1
+    Loop
+    If .IsPresent = False Then '---ループを抜けても要素が見つからないと言うことは失敗扱い
+        InputTextElm = False
+        Exit Function
+    End If
+    
+    Do While RemainingSec > 0 '---要素が見えているかチェック
+        If .IsDisplayed = True Then
+            Exit Do
+        Else
+            DoEvents
+            driver.Wait 1000 '---1秒待機
+        End If
+        RemainingSec = RemainingSec - 1
+    Loop
+    If .IsDisplayed = False Then '---ループを抜けても見つからないと言うことは失敗扱い
+        InputTextElm = False
+        Exit Function
+    End If
+    
+    If .IsEnabled = False Then '---活性化しているかチェック
+        InputTextElm = False
+        Exit Function
+    End If
+    
+    focusToElement driver, element
+    .Click '---念のためクリックしてアクティブにする
+    If AppendMode = False Then '---追記モード判定
+        .Clear '---クリアしないと追記されてしまう
+    End If
+    driver.Wait ClearWaitMS '---稀にクリア直後に入力すると失敗することがあるので0.1秒だけ待機
+    .SendKeys str
+    .SendKeys Keys.Tab '---カーソルアウトで発火するJavaScript対策
+    driver.Wait WaitMS '---規定秒数待機
+End With
+InputTextElm = True
+On Error GoTo 0
+Exit Function
+ErrEnd:
+InputTextElm = False
+Debug.Print Err.Description
+End Function
+Public Function InputTextScript(ByVal driver As Selenium.WebDriver, cssselectors As String, ByVal str As String, Optional ByVal Index As Long = 0, Optional WaitMS = defWaitMS, Optional TotalWaitSec As Long = 30) As Boolean
+'====================================================================================================
+'文字入力を色々考慮しながらやる　※Clearが効かないサイトがあるのでJavaScriptで実行する時用
+'====================================================================================================
+On Error GoTo ErrEnd
+Dim element As Selenium.WebElement
+Set element = driver.FindElementsByCss(cssselectors)(Index + 1)
+With element
+    driver.Timeouts.ImplicitWait = 30
+    RemainingSec = TotalWaitSec
+    Do While RemainingSec > 0 '---要素が存在するかチェック
+        If .IsPresent = True Then
+            Exit Do
+        Else
+            DoEvents
+            driver.Wait 1000 '---1秒待機
+        End If
+        RemainingSec = RemainingSec - 1
+    Loop
+    If .IsPresent = False Then '---ループを抜けても要素が見つからないと言うことは失敗扱い
+        InputTextScript = False
+        Exit Function
+    End If
+    
+    Do While RemainingSec > 0 '---要素が見えているかチェック
+        If .IsDisplayed = True Then
+            Exit Do
+        Else
+            DoEvents
+            driver.Wait 1000 '---1秒待機
+        End If
+        RemainingSec = RemainingSec - 1
+    Loop
+    If .IsDisplayed = False Then '---ループを抜けても見つからないと言うことは失敗扱い
+        InputTextScript = False
+        Exit Function
+    End If
+    
+    If .IsEnabled = False Then '---活性化しているかチェック
+        InputTextScript = False
+        Exit Function
+    End If
+    
+    driver.ExecuteScript ("document.querySelectorAll('" & cssselectors & "')[" & Index & "].value='" & str & "'") '---JavaScriptで文字入力
+    .SendKeys Keys.Tab '---カーソルアウトで発火するJavaScript対策
+    driver.Wait WaitMS '---規定秒数待機
+End With
+InputTextScript = True
+Set element = Nothing
+On Error GoTo 0
+Exit Function
+ErrEnd:
+InputTextScript = False
+Debug.Print Err.Description
+Set element = Nothing
+End Function
+Public Function GetText(ByVal driver As Selenium.WebDriver, ByVal By As Selenium.By, Optional TargetAttr As String = "default", Optional ByVal Index As Long = 1, Optional TotalWaitSec As Long = 30) As String
+'====================================================================================================
+'GetTextElmの亜種
+'====================================================================================================
+If driver.FindElements(By).Count > 0 Then
+    GetText = GetTextElm(driver, driver.FindElements(By)(Index), TargetAttr, TotalWaitSec)
+Else
+    GetText = False
+End If
+End Function
+Public Function GetTextElm(ByVal driver As Selenium.WebDriver, element As Selenium.WebElement, Optional TargetAttr As String = "default", Optional TotalWaitSec As Long = 30) As String
+'====================================================================================================
+'データ取得をText以外からもできるようにしている
+'====================================================================================================
+On Error GoTo ErrEnd
+With element
+    RemainingSec = TotalWaitSec
+    Do While RemainingSec > 0 '---要素が存在するかチェック※待機秒数はLpWaitCntで指定
+        If .IsPresent = True Then
+            Exit Do
+        Else
+            DoEvents
+            driver.Wait 1000 '---1秒待機
+        End If
+        RemainingSec = RemainingSec - 1
+    Loop
+    If .IsPresent = False Then '---ループを抜けても要素が見つからないと言うことは失敗扱い
+        GetTextElm = vbNullString
+        Exit Function
+    End If
+        
+    Select Case LCase(TargetAttr) '---属性指定で取得できるようにする
+        Case "default"
+            GetTextElm = .Text '---textの取得が基本
+            If Len(Trim(GetTextElm)) = 0 Then '---よく使いそうなValueはデフォルトでも補完対象にしておく
+                GetTextElm = .Value
+            End If
+        Case "text" '---明示的にtextを指定するならValueは考慮しない
+            GetTextElm = .Text
+        Case Else
+            GetTextElm = .Attribute(TargetAttr)
+    End Select
+End With
+On Error GoTo 0
+GetTextElm = Trim(GetTextElm)
+Exit Function
+ErrEnd:
+GetTextElm = vbNullString
+Debug.Print Err.Description
+End Function
+Public Function ButtonClick(driver As Selenium.WebDriver, By As Selenium.By, Optional Index As Long = 1, Optional WaitMS = defWaitMS, Optional TotalWaitSec As Long = 30) As Boolean
+'====================================================================================================
+'ButtonClickElmの亜種
+'====================================================================================================
+If driver.FindElements(By).Count > 0 Then
+    ButtonClick = ButtonClickElm(driver, driver.FindElements(By)(Index), WaitMS, TotalWaitSec)
+Else
+    ButtonClick = False
+End If
+End Function
+Public Function ButtonClickElm(driver As Selenium.WebDriver, element As Selenium.WebElement, Optional WaitMS = defWaitMS, Optional TotalWaitSec As Long = 30) As Boolean
+'====================================================================================================
+'ボタンクリックを色々考慮しながらやる
+'====================================================================================================
+On Error GoTo ErrEnd
+With element
+    RemainingSec = TotalWaitSec
+    Do While RemainingSec > 0 '---要素が存在するかチェック※待機秒数はLpWaitCntで指定
+        If .IsPresent = True Then
+            Exit Do
+        Else
+            DoEvents
+            driver.Wait 1000 '---1秒待機
+        End If
+        RemainingSec = RemainingSec - 1
+    Loop
+    If .IsPresent = False Then '---ループを抜けても要素が見つからないと言うことは失敗扱い
+        ButtonClickElm = False
+        Exit Function
+    End If
+    
+    Do While RemainingSec > 0 '---要素が見えているかチェック※待機秒数はLpWaitCntで指定
+        If .IsDisplayed = True Then
+            Exit Do
+        Else
+            DoEvents
+            driver.Wait 1000 '---あえて変数ではなくて1秒待機で固定している
+        End If
+        RemainingSec = RemainingSec - 1
+    Loop
+    If .IsDisplayed = False Then '---ループを抜けても見つからないと言うことは失敗扱い
+        ButtonClickElm = False
+        Exit Function
+    End If
+    
+    If .IsEnabled = False Then '---活性化しているかチェック
+        ButtonClickElm = False
+        Exit Function
+    End If
+    .Click
+    driver.Wait WaitMS '---規定秒数待機
+End With
+ButtonClickElm = True
+On Error GoTo 0
+Exit Function
+ErrEnd:
+ButtonClickElm = False
+Debug.Print Err.Description
+End Function
+Public Function ToolChecker() As Object
+Dim sParam As String
+Dim param As Object
+Dim objHttp As Object
+
+On Error Resume Next
+Set objHttp = CreateObject("MSXML2.XMLHTTP")
+Set param = CreateObject("Scripting.Dictionary")
+With param
+    .Add "nm", "Qoo10Amazon"
+    .Add "user", "4aloneinc"
+    .Add "key", "T5GJZKu56gvUmRWLZFrJ4iD8n3H33r"
+End With
+
+With objHttp
+    .Open "POST", "https://javeo.jp/api/", True
+    Call .setRequestHeader("Content-Type", "application/x-www-form-urlencoded")
+    sParam = "nm=" & param.Item("nm") & "&user=" & param.Item("user") & "&key=" & param.Item("key") & ""
+    .Send (sParam)
+    Do While .readyState <> 4
+        DoEvents
+    Loop
+    Set ToolChecker = JsonConverter.ParseJson(.responseText)
+End With
+On Error GoTo 0
+End Function
+
+Public Function focusToElement(ByVal driver As Selenium.ChromeDriver, ByVal element As Selenium.WebElement)
+'====================================================================================================
+'指定した要素にスクロースさせる
+'====================================================================================================
+Dim Actions As Selenium.Actions
+Set Actions = driver.Actions.MoveToElement(element)
+Actions.Perform
+Set Actions = Nothing
+End Function
+Public Function ScrollAll(driver As Selenium.ChromeDriver)
+'====================================================================================================
+'ページエンドのJavascriptを発火させるため一番下までページスクロールする
+'====================================================================================================
+Dim win_height, last_top, Top, new_last_height, last_height
+'ブラウザのウインドウ高を取得する
+win_height = driver.ExecuteScript("return window.innerHeight")
+
+'スクロール開始位置の初期値（ページの先頭からスクロールを開始する）
+last_top = 1
+
+'スクロール前のページの高さを取得
+last_height = driver.ExecuteScript("return document.body.scrollHeight")
+
+'スクロール開始位置を設定
+Top = last_top
+
+'ページ最下部まで、徐々にスクロールしていく
+Do
+    Do While Top < last_height
+        Top = Top + Int(win_height * 0.8)
+        driver.ExecuteScript ("window.scrollTo(0, " & Top & ")")
+        Application.Wait Now + TimeSerial(0, 0, 0.6)
+    Loop
+    '１秒待って、スクロール後のページの高さを取得する
+    win_height = driver.ExecuteScript("return window.innerHeight")
+    last_height = driver.ExecuteScript("return document.body.scrollHeight")
+    Application.Wait Now + TimeSerial(0, 0, 0.6)
+Loop While Top < last_height
+End Function
+
