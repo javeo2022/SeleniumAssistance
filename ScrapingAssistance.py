@@ -1,52 +1,55 @@
 # -*- coding: utf-8 -*-
 import logging
+import logging.config
+import logging.handlers
+
 import os
 import shutil
-import subprocess
 import tempfile
+import subprocess
 from subprocess import CREATE_NO_WINDOW
 from time import sleep
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
-# from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common import utils
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
-# from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
-# from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
-# from selenium.webdriver.support.ui import WebDriverWait
-# from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.support.ui import WebDriverWait
 
+# 定数設定
+COMMON_WAIT_SECONDS = 0.3
 
+# loggerの設定
 def get_module_logger():
-    logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
+    module_name = os.path.basename(__file__).replace('.py', '')
+    logger = logging.getLogger(module_name)
     logger = _set_handler(logger, logging.StreamHandler())
-    logger.setLevel(logging.DEBUG)
-    # logger.setLevel(logging.INFO)
-    # logger.setLevel(logging.ERROR)
+    logger.setLevel(logging .INFO)
     logger.propagate = False
     return logger
 
-
-def _set_handler(logger, handler):
+def _set_handler(logger: logging.Logger, handler: logging.StreamHandler):
     handler.setFormatter(logging.Formatter('%(asctime)s %(name)s:%(lineno)s %(funcName)s [%(levelname)s]: %(message)s'))
     logger.addHandler(handler)
     return logger
 
-
 logger = get_module_logger()
 
-
+# ここからがメインクラス
 class ScrapingAssistance():
     def __init__(self) -> None:
         self.selenium_flg = False
         self.bs_flg = False
+        self.wait_seconds = COMMON_WAIT_SECONDS
+        self.sp = None
 
     def __del__(self):
         if self.selenium_flg is True:
@@ -54,7 +57,7 @@ class ScrapingAssistance():
 
     def selenium_open(self, headless: bool = False, user_data_dir: str = '', timeout: int = 10, imagesEnabled: bool = True,
                       remote_debugging_mode: bool = False, port: int = 0, driver_path: str = '', mobile_mode: str = '',
-                      download_dir: str = ''):
+                      download_dir: str = '', incognito: bool=False, enable_js: bool=True):
         '''
         headless:ヘッドレスモードで実行するか
         user_data_dir:ユーザープロファイルを指定する場合フォルダパスを指定※"Default"か"Profile x"を指定
@@ -66,24 +69,25 @@ class ScrapingAssistance():
         '''
         self.timeout = timeout
         options = Options()
+        # chrome.exeの在りかを探す
+        chrome_exe_path = find_chrome_executable()
         # 引数のdriver_pathに指定がないor指定のパスに誤りがあれば最新化しつつパスを決める
         # 判定のためにパス情報を正規化しておく　※''は'.'になるので注意
-        driver_path = os.path.normpath(driver_path)
-        if driver_path == '.':
+        # driver_path = os.path.normpath(driver_path)
+        # if driver_path == '.':
             # 指定がない場合
-            driver_path = ''
-        elif os.path.isfile(driver_path) is False:
+            # driver_path = ''
+        # elif os.path.isfile(driver_path) is False:
             # 指定があるけどファイルがない場合
-            driver_path = ''
-        elif os.path.basename(driver_path) != 'chromedriver.exe':
+            # driver_path = ''
+        # elif os.path.basename(driver_path) != 'chromedriver.exe':
             # ファイルはあったけど'chromedriver.exe'じゃない場合
-            driver_path = ''
-
+            # driver_path = ''
         # 引数のuser_data_dirに指定がないならプロファイル情報をtmpに作る※最後にフォルダ削除する判定も付ける
         # 判定のためにパス情報を正規化しておく　※''は'.'になるので注意
         self.user_data_dir = os.path.normpath(user_data_dir)
         # 指定がないorプロファイルのフォルダ名（DefaultかProfileで始まる）ではない場合はテンポラリにフォルダ作成して指定する
-        if self.user_data_dir == '.' or (self.user_data_dir != 'Default' and self.user_data_dir.startswith('Profile') is False):
+        if self.user_data_dir == '.' or (self.user_data_dir.split('\\')[-1] != 'Default' and self.user_data_dir.split('\\')[-1].startswith('Profile') is True):
             self.user_data_dir = os.path.normpath(tempfile.mkdtemp())
             self.delete_user_data_dir = self.user_data_dir
             self.user_data_dir = os.path.join(self.user_data_dir, 'User Data', 'Default')
@@ -95,62 +99,69 @@ class ScrapingAssistance():
             self.user_data_delete = False
         options.add_argument('--user-data-dir={}'.format(self.user_data_dir))
 
-        # 起動オプションの引数を設定する　※お好みでコメントアウトを
-        options.add_argument('--disable-gpu')                   # GPUハードウェアアクセラレーションを無効
-        options.add_argument('--disable-extensions')            # 全ての拡張機能を無効
-        options.add_argument('--proxy-server="direct://"')      # Proxy経由ではなく直接接続
-        options.add_argument('--proxy-bypass-list=*')           # すべてのホスト名
-        options.add_argument('--start-maximized')               # 初期のウィンドウ最大化
-        # options.add_argument('--no-sandbox')                    # Chromeの保護機能を無効
-        options.add_argument('--incognito')                     # Chromeをシークレットモードで起動
-        prefs = {
-            'profile.default_content_setting_values.notifications': 2,                 # 通知ポップアップを無効
-            # 'profile.managed_default_content_settings.javascript': 2,                  # Javascriptを無効
-            'credentials_enable_service': False,                                       # パスワード保存のポップアップを無効
-            'profile.password_manager_enabled': False,                                 # パスワード保存のポップアップを無効
-            # 'download.default_directory' : download_dir                               # ダウンロード先のディレクトリを指定
-        }
-        options.add_experimental_option('prefs', prefs)
-
-        # ヘッドレスモードの場合
-        if headless is True:
-            options.add_argument('--headless=new')                  # ヘッドレスモードで起動する
-        if imagesEnabled is False:
-            options.add_argument('--blink-settings=imagesEnabled=false')    # 画像を読み込まない
-
-        # スマホ表示にする場合のオプション
-        if mobile_mode == 'android':
-            mobile_emulation = {'deviceName': 'Galaxy S9+'}
-            options.add_experimental_option('mobileEmulation', mobile_emulation)
-        elif mobile_mode == 'ios':
-            # 最近iOS番にならない
-            mobile_emulation = {'deviceName': 'iPhone SE'}
-            options.add_experimental_option('mobileEmulation', mobile_emulation)
-
-        # ダウンロード先フォルダが指定されていれば
-        if download_dir != '':
-            if os.path.isdir(download_dir) is True:
-                prefs = {'download.default_directory': download_dir}
-                options.add_experimental_option('prefs', prefs)
-
         # chrome.exeをデバックで操作する
         if remote_debugging_mode is True:
             # ポート番号を設定する
             debug_port = str(port if port != 0 else utils.free_port())
             # ローカルホスト
             debug_host = '127.0.0.1'
-            options.add_argument('--remote-debugging-host={}'.format(debug_host))
             options.add_argument('--remote-debugging-port={}'.format(debug_port))
-            # options.debugger_address = '{}:{}'.format(debug_host, debug_port)
-            # chrome.exeの在りかを探す
-            chrome_exe_path = find_chrome_executable()
-            self.driver = subprocess.Popen([chrome_exe_path, *options.arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.browser_pid = self.driver
+            # Chromeの仕様に合わせてシークレットモードにする
+            options.add_argument('--incognito')
+            # subprocessでchromeを立ち上げる
+            self.sp = subprocess.Popen([chrome_exe_path, *options.arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Optionsをリセットしてリモートデバック用に再設定する
+            options = Options()
+            # 立ち上げたchromeをseleniumで掴みに行く
+            options.add_experimental_option("debuggerAddress", '{}:{}'.format(debug_host, debug_port))
+            self.driver = webdriver.Chrome(options=options)
+            # pidを控えておく
+            self.browser_pid = self.driver.service.process.pid
         else:
+            # 起動オプションの引数を設定する　※お好みでコメントアウトを
+            # options.add_argument('--disable-gpu')                   # GPUハードウェアアクセラレーションを無効
+            # options.add_argument('--disable-extensions')            # 全ての拡張機能を無効
+            # options.add_argument('--proxy-server="direct://"')      # Proxy経由ではなく直接接続
+            # options.add_argument('--proxy-bypass-list=*')           # すべてのホスト名
+            options.add_argument('--start-maximized')               # 初期のウィンドウ最大化
+            # options.add_argument('--no-sandbox')                  # Chromeの保護機能を無効
+            # ヘッドレスモードの判定
+            if headless is True:
+                options.add_argument('--headless=new') 
+            # 画像を読み込むかの判定
+            if imagesEnabled is False:
+                options.add_argument('--blink-settings=imagesEnabled=false')
+            # シークレットモードの判定
+            if incognito is True and remote_debugging_mode is False:
+                options.add_argument('--incognito')
+            prefs = {
+                'profile.default_content_setting_values.notifications': 2,                 # 通知ポップアップを無効
+                'credentials_enable_service': False,                                       # パスワード保存のポップアップを無効
+                'profile.password_manager_enabled': False,                                 # パスワード保存のポップアップを無効
+            }
+            options.add_experimental_option('prefs', prefs)
+            # ダウンロード先フォルダが指定されていれば
+            if download_dir != '':
+                if os.path.isdir(download_dir) is True:
+                    options.add_experimental_option('prefs', {'download.default_directory': download_dir})
+            # javascript無効か判断
+            if enable_js is True:
+                options.add_experimental_option('prefs', {'profile.managed_default_content_settings.javascript': 1})
+            else:
+                options.add_experimental_option('prefs', {'profile.managed_default_content_settings.javascript': 2})
+            # スマホ表示にする場合のオプション
+            if mobile_mode == 'android':
+                mobile_emulation = {'deviceName': 'Galaxy S9+'}
+                options.add_experimental_option('mobileEmulation', mobile_emulation)
+            elif mobile_mode == 'ios':
+                # 最近iOSにならない
+                mobile_emulation = {'deviceName': 'iPhone SE'}
+                options.add_experimental_option('mobileEmulation', mobile_emulation)
+
             self.service = Service()
             self.service.creation_flags = CREATE_NO_WINDOW
             self.driver = webdriver.Chrome(service=self.service, options=options)
-
+            self.driver.maximize_window()
         # ページロードの最大待機時間
         # self.driver.set_page_load_timeout(timeout)
         # 要素が見つかるまでの最大待機時間
@@ -158,14 +169,18 @@ class ScrapingAssistance():
         # js完了までの最大待機時間
         # self.driver.set_script_timeout(timeout)
         # とりあえずGoogleを開く
-        self.driver.get('https://www.google.com/?hl=ja')
+        # self.driver.get('https://www.google.com/?hl=ja')
         self.selenium_flg = True
 
-    def selenium_quit(self):
+    def selenium_quit(self) -> bool:
         # 閉じる時はkillでプロセスを落とす
-        self.driver.quit()
         try:
-            self.service.process.kill()
+            if self.sp is None:
+                self.driver.close()
+                self.driver.quit()
+            else:
+                self.sp.kill()
+            self.driver.service.process.kill()
         except Exception:
             pass
         try:
@@ -175,11 +190,12 @@ class ScrapingAssistance():
         # 一時的に作ったプロファイルデータのフォルダを削除する
         try:
             if self.user_data_delete is True:
-                shutil.rmtree(self.delete_user_data_dir)
-        except Exception:
+                shutil.rmtree(self.delete_user_data_dir, ignore_errors=True)
+                pass
+        except Exception as e:
             pass
 
-    def selenium_input(self, by: By, value: str, str: str = '', idx: int = 0, timeout_second: int = -1) -> dict:
+    def selenium_input(self, by: By, value: str, str: str = '', idx: int = 0, timeout_second: int = -1) -> bool:
         '''
         by:指定するByを設定
         value:byで指定する文字列
@@ -196,14 +212,23 @@ class ScrapingAssistance():
         '''
         if timeout_second == -1:
             timeout_second = self.timeout
-
-        # 指定したインデックスが要素の数より多い場合DOM上にない判定
-        if len(self.driver.find_elements(by, value)) <= idx:
-            return {'rc': 1, 'message': 'This element is not found'}
-
+        # 指定したインデックスが要素の数より多い場合
+        try:
+            _ = WebDriverWait(self.driver, timeout_second).until(EC.visibility_of_element_located((by, value)))
+            if len(self.driver.find_elements(by, value)) < idx:
+                raise NoSuchElementException('No Such Element')
+        except TimeoutException:
+            logger.error('This element is not found')
+            return False
+        except NoSuchElementException:
+            logger.error('No Such Element')
+            return False
+        except Exception:
+            logger.error('Unknown Error', exc_info=True)
+            return False
         return self.selenium_input_elm(self.driver.find_elements(by, value)[idx], str, timeout_second)
 
-    def selenium_input_elm(self, element: WebElement, str: str = '', timeout_second: int = -1) -> dict:
+    def selenium_input_elm(self, element: WebElement, str: str = '', timeout_second: int = -1) -> bool:
         '''
         WebElementをダイレクトに指定して文字入力をする
         element:指定するWebElementを設定
@@ -219,33 +244,38 @@ class ScrapingAssistance():
         # タイムアウト秒数を設定する
         if timeout_second == -1:
             timeout_second = self.timeout
-
         # 画面上に表示されているか確認する
-        if element.is_displayed is False:
-            return {'rc': 2, 'message': 'This element is not visible'}
-
+        try:
+            _ = WebDriverWait(self.driver, timeout_second).until(EC.visibility_of(element))
+        except TimeoutException:
+            logger.error('This element is not found')
+            return False
+        except NoSuchElementException:
+            logger.error('No Such Element')
+            return False
+        except Exception:
+            logger.error('Unknown Error', exc_info=True)
+            return False
         # タグがinputでもtextareaでもなければエラー扱いにする
         if element.tag_name != 'input' and element.tag_name != 'textarea':
-            return {'rc': 3, 'message': 'This element\'s tagName is not input and textarea'}
-
+            logger.error('This element\'s tagName is not input and textarea')
+            return False
         # タグが入力可能か確認する
         if element.is_enabled() is False:
-            return {'rc': 4, 'message': 'This element is denabled'}
-
+            logger.error('This element is denabled')
+            return False
         # 念のため画面をelementへ動かしておく
         ActionChains(self.driver).move_to_element(element).perform()
-
         # ここから正常時の操作
-        element.clear       # send_keysだと追記になってしまうので一旦クリアしておく
+        element.clear()     # send_keysだと追記になってしまうので一旦クリアしておく
         element.click()     # 念のためクリックしてアクティブにする
-        sleep(1)
+        sleep(COMMON_WAIT_SECONDS)
         element.send_keys(str)          # ここで実際に文字入力する
         element.send_keys(Keys.TAB)     # 入力後に発火するjsの可能性があるのでタブ移動する
+        sleep(COMMON_WAIT_SECONDS)
+        return True
 
-        sleep(1)
-        return {'rc': 0, 'message': 'OK'}
-
-    def selenium_get(self, by: By, value: str, idx: int = 0, att: str = 'default', timeout_second: int = -1) -> dict:
+    def selenium_get(self, by: By, value: str, idx: int = 0, att: str = 'default', timeout_second: int = -1) -> str:
         '''
         by:指定するByを設定
         value:byで指定する文字列
@@ -263,12 +293,22 @@ class ScrapingAssistance():
             異常終了した場合も''を返す
         '''
         # 指定したインデックスが要素の数より多い場合DOM上にない判定
-        if len(self.driver.find_elements(by, value)) <= idx:
-            return {'rc': 1, 'text': '', 'message': 'This element is not found'}
-
+        try:
+            _ = WebDriverWait(self.driver, timeout_second).until(EC.presence_of_element_located((by, value)))
+            if len(self.driver.find_elements(by, value)) < idx:
+                raise NoSuchElementException('No Such Element')
+        except TimeoutException:
+            logger.error('This element is not found')
+            return False
+        except NoSuchElementException:
+            logger.error('No Such Element')
+            return False
+        except Exception:
+            logger.error('Unknown Error', exc_info=True)
+            return False
         return self.selenium_get_elm(self.driver.find_elements(by, value)[idx], att, timeout_second)
 
-    def selenium_get_elm(self, element: WebElement, att: str = 'default', timeout_second: int = -1) -> dict:
+    def selenium_get_elm(self, element: WebElement, att: str = 'default', timeout_second: int = -1) -> str:
         '''
         by:指定するByを設定
         value:byで指定する文字列
@@ -286,18 +326,24 @@ class ScrapingAssistance():
         # タイムアウト秒数を設定する
         if timeout_second == -1:
             timeout_second = self.timeout
-
-        # 画面上にelementが表示されているか確認する
-        if element.is_displayed is False:
-            return {'rc': 2, 'text': '', 'message': 'This element is not visible'}
-
+        # 画面上に表示されているか確認する
+        try:
+            element
+        except TimeoutException:
+            logger.error('This element is not found')
+            return ''
+        except NoSuchElementException:
+            logger.error('No Such Element')
+            return ''
+        except Exception:
+            logger.error('Unknown Error', exc_info=True)
+            return ''
         # タグが入力可能か確認する
         if element.is_enabled() is False:
-            return {'rc': 4, 'text': '', 'message': 'This element is denabled'}
-
+            logger.error('This element is denabled')
+            return ''
         # 念のため画面をelementへ動かしておく
-        ActionChains(self.driver).move_to_element(element).perform()
-
+        # ActionChains(self.driver).move_to_element(element).perform()
         # 取得対象に指定がない場合ははtextを確認して値がない場合はvalueを確認する
         if att == 'default':
             ret = element.text
@@ -309,15 +355,14 @@ class ScrapingAssistance():
         else:
             # text以外はattの指定にする
             ret = element.get_attribute(att)
-
         # 返値がNoneはattrに該当がなかった場合
         if ret is None:
-            return {'rc': 5, 'text': '', 'message': 'This element\'s attribute is not found'}
+            logger.error('This element\'s attribute is not found')
+            return ''
+        sleep(COMMON_WAIT_SECONDS)
+        return ret
 
-        sleep(1)
-        return {'rc': 0, 'message': 'OK'}
-
-    def selenium_click(self, by: By, value: str, idx: int = 0, timeout_second: int = -1) -> dict:
+    def selenium_click(self, by: By, value: str, idx: int = 0, timeout_second: int = -1) -> bool:
         '''
         by:指定するByを設定
         value:byで指定する文字列
@@ -333,12 +378,22 @@ class ScrapingAssistance():
             99:その他
         '''
         # 指定したインデックスが要素の数より多い場合DOM上にない判定
-        if len(self.driver.find_elements(by, value)) <= idx:
-            return {'rc': 1, 'message': 'This element is not found'}
-
+        try:
+            _ = WebDriverWait(self.driver, timeout_second).until(EC.visibility_of_element_located((by, value)))
+            if len(self.driver.find_elements(by, value)) < idx:
+                raise NoSuchElementException('No Such Element')
+        except TimeoutException:
+            logger.error('This element is not found')
+            return False
+        except NoSuchElementException:
+            logger.error('No Such Element')
+            return False
+        except Exception:
+            logger.error('Unknown Error', exc_info=True)
+            return False
         return self.selenium_click_elm(self.driver.find_elements(by, value)[idx], timeout_second)
 
-    def selenium_click_elm(self, element: WebElement, timeout_second: int = -1) -> dict:
+    def selenium_click_elm(self, element: WebElement, timeout_second: int = -1) -> bool:
         '''
         by:指定するByを設定
         value:byで指定する文字列
@@ -354,24 +409,32 @@ class ScrapingAssistance():
         # タイムアウト秒数を設定する
         if timeout_second == -1:
             timeout_second = self.timeout
-
-        # 画面上にelementが表示されているか確認する
-        if element.is_displayed is False:
-            return {'rc': 2, 'message': 'This element is not visible'}
-
+        # 画面上に表示されているか確認する
+        try:
+            _ = WebDriverWait(self.driver, timeout_second).until(EC.visibility_of(element))
+        except TimeoutException:
+            logger.error('This element is not found')
+            return False
+        except NoSuchElementException:
+            logger.error('No Such Element')
+            return False
+        except Exception:
+            logger.error('Unknown Error', exc_info=True)
+            return False
         # タグが入力可能か確認する
         if element.is_enabled() is False:
-            return {'rc': 4, 'message': 'This element is denabled'}
-
+            return False
         # 念のため画面をelementへ動かしておく
         self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
         ActionChains(self.driver).move_to_element(element).perform()
-        element.click()
+        try:
+            element.click()
+        except:
+            self.driver.execute_script('arguments[0].click();', element)
+        sleep(COMMON_WAIT_SECONDS)
+        return True
 
-        sleep(1)
-        return {'rc': 0, 'message': 'OK'}
-
-    def selenium_select(self, by: By, value: str, idx: int = 0, target_type: str = 'visible_text', target_value: str = '', timeout_second: int = -1) -> dict:
+    def selenium_select(self, by: By, value: str, idx: int = 0, target_type: str = 'visible_text', target_value: str = '', timeout_second: int = -1) -> bool:
         '''
         by:指定するByを設定
         value:byで指定する文字列
@@ -388,13 +451,25 @@ class ScrapingAssistance():
             6:タグがselectじゃない
             99:その他
         '''
+        if timeout_second == -1:
+            timeout_second = self.timeout
         # 指定したインデックスが要素の数より多い場合DOM上にない判定
-        if len(self.driver.find_elements(by, value)) <= idx:
-            return {'rc': 1, 'message': 'This element is not found'}
-
+        try:
+            _ = WebDriverWait(self.driver, timeout_second).until(EC.visibility_of_element_located((by, value)))
+            if len(self.driver.find_elements(by, value)) < idx:
+                raise NoSuchElementException('No Such Element')
+        except TimeoutException:
+            logger.error('This element is not found')
+            return False
+        except NoSuchElementException:
+            logger.error('No Such Element')
+            return False
+        except Exception:
+            logger.error('Unknown Error', exc_info=True)
+            return False
         return self.selenium_select_elm(self.driver.find_elements(by, value)[idx], target_type, target_value, timeout_second)
 
-    def selenium_select_elm(self, element: WebElement, target_type: str = 'visible_text', target_value: str = '', timeout_second: int = -1) -> dict:
+    def selenium_select_elm(self, element: WebElement, target_type: str = 'visible_text', target_value: str = '', timeout_second: int = -1) -> bool:
         '''
         WebElementをダイレクトに指定して文字入力をする
         element:指定するWebElementを設定
@@ -414,29 +489,31 @@ class ScrapingAssistance():
         # タイムアウト秒数を設定する
         if timeout_second == -1:
             timeout_second = self.timeout
-
-        # 画面上にelementが表示されているか確認する
-        if element.is_displayed is False:
-            return {'rc': 2, 'message': 'This element is not visible'}
-
-        # タグが変更可能か確認する
-        if element.is_enabled() is False:
-            return {'rc': 4, 'message': 'This element is denabled'}
-
+        try:
+            ret = WebDriverWait(self.driver, timeout_second).until(EC.element_to_be_clickable(element))
+        except TimeoutException:
+            logger.error('This element is not found')
+            return False
+        except NoSuchElementException:
+            logger.error('No Such Element')
+            return False
+        except Exception:
+            logger.error('Unknown Error', exc_info=True)
+            return False
         # タグを確認する
         if element.tag_name.lower() != 'select':
-            return {'rc': 6, 'message': 'This element\'s tagName is not select'}
-
+            logger.error('This element\'s tagName is not select', exc_info=True)
+            return False
         # 念のため画面をelementへ動かしておく
         ActionChains(self.driver).move_to_element(element).perform()
-
         # ここから正常時の操作
         select = Select(element)
         for idx, select_option in enumerate(select.options):
             if target_type == 'index':
-                if str(idx) == target_value:
-                    select.select_by_index(target_value)
-                    break
+                if type(target_value) is int:
+                    if idx == target_value:
+                        select.select_by_index(target_value)
+                        break
             elif target_type == 'value':
                 if select_option.get_attribute("value") == target_value:
                     select.select_by_value(target_value)
@@ -446,14 +523,27 @@ class ScrapingAssistance():
                     select.select_by_visible_text(target_value)
                     break
             else:
-                return {'rc': 7, 'message': 'target_type is input error'}
+                logger.error('target_type is input error')
+                return False
         else:
-            return {'rc': 8, 'message': 'target_value is not applicable'}
+            logger.error('target_value is not applicable')
+            return False
+        sleep(COMMON_WAIT_SECONDS)
+        return True
 
-        sleep(1)
-        return {'rc': 0, 'message': 'OK'}
+    def selenium_wait(self, css_selector: str, wait_timeout: int = 10) -> bool: 
+        try:
+            WebDriverWait(self.driver, wait_timeout).until(EC.presence_of_element_located((By.CSS_SELECTOR, css_selector)))
+            sleep(COMMON_WAIT_SECONDS)
+        except TimeoutException:
+            logger.error('wait error!', exc_info=True)
+            return False
+        except Exception as e:
+            logger.error('error!', exc_info=True)
+            return False
+        return True
 
-    def bs4_set(self, page_source: str = '', parser: str = 'html.parser'):
+    def bs4_set(self, page_source: str = '', parser: str = 'html.parser') -> bool:
         '''
         int:インデックスの指定が必要な場合 ※初期値は0
         timeout_second:タイムアウトまでの秒数 ※初期値は別途設定
@@ -467,11 +557,10 @@ class ScrapingAssistance():
         '''
         if page_source == '':
             page_source = self.driver.page_source
-
         self.soup = BeautifulSoup(page_source, parser)
         self.bs_flg = True
 
-    def bs4_get(self, selector: str = '', target_attribute: str = 'text', idx: int = 0) -> dict:
+    def bs4_get(self, selector: str = '', target_attribute: str = 'text', idx: int = 0) -> str:
         '''
         int:インデックスの指定が必要な場合 ※初期値は0
         timeout_second:タイムアウトまでの秒数 ※初期値は別途設定
@@ -484,26 +573,25 @@ class ScrapingAssistance():
             異常終了した場合も''を返す
         '''
         if self.bs_flg is False:
-            return {'rc': 9, 'text': '', 'message': 'Not set BeautifulSoup'}
-
+            logger.error('Not set BeautifulSoup')
+            return ''
         # 指定したインデックスが要素の数より多い場合DOM上にない判定
         if len(self.soup.select(selector)) <= idx:
-            return {'rc': 1, 'text': '', 'message': 'This selector is not found'}
-
+            logger.error('This selector is not found')
+            return ''
         if target_attribute == 'text':
             ret = self.soup.select(selector)[idx].get_text()
         else:
             ret = self.soup.select(selector)[idx].get(target_attribute)
-
         if ret is None:
-            return {'rc': 5, 'text': '', 'message': 'This selector\'s attribute is not found'}
-
-        return {'rc': 0, 'text': ret, 'message': 'OK'}
+            logger.error('This selector\'s attribute is not found')
+            return ''
+        return ret
 
     def bs4_return_select(self, selector: str = ''):
         return self.soup.select(selector=selector)
 
-    def window_scroll(self):
+    def window_scroll(self, wait_millisecond: int = 1000):
         '''
         js対応のためにゆっくり画面を一番下にスクロールする
         '''
@@ -514,19 +602,19 @@ class ScrapingAssistance():
             Top = Top + int(win_height * 0.8)
             self.driver.execute_script(f'window.scrollTo(0, "{str(Top)}")')
             last_height = self.driver.execute_script('return document.body.scrollHeight')
-            sleep(1)
-
+            sleep(wait_millisecond / 1000)
 
 def find_chrome_executable():
     '''
     chrome.exe のフルパスを取得する
     '''
     candidates = set()
+    # 環境変数からフォルダパスを探す
     for item in map(os.environ.get, ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA', 'PROGRAMW6432'),):
         if item is not None:
             for subitem in ('Google/Chrome/Application', 'Google/Chrome Beta/Application', 'Google/Chrome Canary/Application',):
                 candidates.add(os.sep.join((item, subitem, 'chrome.exe')))
-
+    # フォルダが存在していてアクセス権があればフォルダパスを返す
     for candidate in candidates:
         if os.path.exists(candidate) and os.access(candidate, os.X_OK):
             return os.path.normpath(candidate)
